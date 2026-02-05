@@ -1,0 +1,48 @@
+PolypMix Experiment Results
+========================================
+Batch Size: 8
+PolypMix Ratio: 1.0
+Threshold: 0.7
+Training Size: 490
+Learning Rate: 0.0001
+Image Size: 224
+========================================
+
+Epoch 1: Train Loss=0.4543, Train Dice=0.7117, Train IoU=0.6162 | Val Loss=0.2058, Val Dice=0.8767, Val IoU=0.7810
+Epoch 2: Train Loss=0.1524, Train Dice=0.9227, Train IoU=0.8574 | Val Loss=0.1489, Val Dice=0.9121, Val IoU=0.8388
+Epoch 3: Train Loss=0.1123, Train Dice=0.9427, Train IoU=0.8923 | Val Loss=0.1546, Val Dice=0.9100, Val IoU=0.8358
+Epoch 4: Train Loss=0.0796, Train Dice=0.9582, Train IoU=0.9200 | Val Loss=0.1313, Val Dice=0.9233, Val IoU=0.8578
+Epoch 5: Train Loss=0.0707, Train Dice=0.9630, Train IoU=0.9288 | Val Loss=0.1224, Val Dice=0.9283, Val IoU=0.8665
+Epoch 6: Train Loss=0.0593, Train Dice=0.9683, Train IoU=0.9386 | Val Loss=0.1225, Val Dice=0.9314, Val IoU=0.8719
+Epoch 7: Train Loss=0.0589, Train Dice=0.9688, Train IoU=0.9395 | Val Loss=0.1358, Val Dice=0.9233, Val IoU=0.8583
+Epoch 8: Train Loss=0.0507, Train Dice=0.9731, Train IoU=0.9477 | Val Loss=0.1235, Val Dice=0.9293, Val IoU=0.8684
+Epoch 9: Train Loss=0.0471, Train Dice=0.9751, Train IoU=0.9514 | Val Loss=0.1303, Val Dice=0.9297, Val IoU=0.8691
+Epoch 10: Train Loss=0.0769, Train Dice=0.9614, Train IoU=0.9266 | Val Loss=0.1305, Val Dice=0.9238, Val IoU=0.8588
+Epoch 11: Train Loss=0.0770, Train Dice=0.9601, Train IoU=0.9244 | Val Loss=0.1121, Val Dice=0.9356, Val IoU=0.8793
+Epoch 12: Train Loss=0.0675, Train Dice=0.9649, Train IoU=0.9326 | Val Loss=0.1411, Val Dice=0.9193, Val IoU=0.8512
+Epoch 13: Train Loss=0.0521, Train Dice=0.9722, Train IoU=0.9461 | Val Loss=0.1102, Val Dice=0.9405, Val IoU=0.8879
+Epoch 14: Train Loss=0.0413, Train Dice=0.9783, Train IoU=0.9576 | Val Loss=0.1262, Val Dice=0.9314, Val IoU=0.8720
+Epoch 15: Train Loss=0.0375, Train Dice=0.9799, Train IoU=0.9606 | Val Loss=0.1155, Val Dice=0.9387, Val IoU=0.8847
+Epoch 16: Train Loss=0.0350, Train Dice=0.9813, Train IoU=0.9634 | Val Loss=0.1161, Val Dice=0.9378, Val IoU=0.8832
+Epoch 17: Train Loss=0.0320, Train Dice=0.9832, Train IoU=0.9670 | Val Loss=0.1138, Val Dice=0.9396, Val IoU=0.8863
+Epoch 18: Train Loss=0.0323, Train Dice=0.9828, Train IoU=0.9661 | Val Loss=0.1170, Val Dice=0.9402, Val IoU=0.8873
+Epoch 19: Train Loss=0.0295, Train Dice=0.9844, Train IoU=0.9692 | Val Loss=0.1165, Val Dice=0.9410, Val IoU=0.8887
+Epoch 20: Train Loss=0.0280, Train Dice=0.9852, Train IoU=0.9709 | Val Loss=0.1182, Val Dice=0.9410, Val IoU=0.8887
+Epoch 21: Train Loss=0.0283, Train Dice=0.9850, Train IoU=0.9704 | Val Loss=0.1170, Val Dice=0.9419, Val IoU=0.8905
+Epoch 22: Train Loss=0.0253, Train Dice=0.9863, Train IoU=0.9730 | Val Loss=0.1179, Val Dice=0.9421, Val IoU=0.8907
+Epoch 23: Train Loss=0.0293, Train Dice=0.9846, Train IoU=0.9698 | Val Loss=0.2698, Val Dice=0.8617, Val IoU=0.7635
+Epoch 24: Train Loss=0.0468, Train Dice=0.9760, Train IoU=0.9534 | Val Loss=0.1448, Val Dice=0.9248, Val IoU=0.8622
+Epoch 25: Train Loss=0.0295, Train Dice=0.9845, Train IoU=0.9694 | Val Loss=0.1188, Val Dice=0.9381, Val IoU=0.8837
+Epoch 26: Train Loss=0.0475, Train Dice=0.9763, Train IoU=0.9543 | Val Loss=0.1388, Val Dice=0.9299, Val IoU=0.8699
+Epoch 27: Train Loss=0.0295, Train Dice=0.9845, Train IoU=0.9694 | Val Loss=0.1404, Val Dice=0.9286, Val IoU=0.8673
+Epoch 28: Train Loss=0.0679, Train Dice=0.9660, Train IoU=0.9355 | Val Loss=0.1333, Val Dice=0.9243, Val IoU=0.8601
+Epoch 29: Train Loss=0.0329, Train Dice=0.9828, Train IoU=0.9663 | Val Loss=0.1198, Val Dice=0.9360, Val IoU=0.8800
+Epoch 30: Train Loss=0.0258, Train Dice=0.9863, Train IoU=0.9731 | Val Loss=0.1277, Val Dice=0.9341, Val IoU=0.8769
+Epoch 31: Train Loss=0.0248, Train Dice=0.9868, Train IoU=0.9740 | Val Loss=0.1356, Val Dice=0.9317, Val IoU=0.8727
+Epoch 32: Train Loss=0.0235, Train Dice=0.9877, Train IoU=0.9757 | Val Loss=0.1327, Val Dice=0.9335, Val IoU=0.8756
+
+========================================
+FINAL BEST RESULT
+Best Validation Dice: 0.9421
+Best Epoch: 22
+Total Epochs Trained: 32
