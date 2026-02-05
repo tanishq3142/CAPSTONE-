@@ -1,0 +1,12 @@
+# Virtual environment
+.venv/
+
+# Image folders
+images/
+Ground Truth/
+subi/
+subgt/
+subcolr/
+
+# Individual images
+43.png
