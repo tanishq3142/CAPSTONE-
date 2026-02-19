@@ -1,0 +1,1134 @@
+--- CANDIDATE CELL 1 ---
+# Block 1: Install Dependencies & Import Libraries
+
+!pip install -q transformers
+
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm.notebook import tqdm
+import PIL.Image
+import cv2
+import glob
+import time
+
+# PyTorch Imports
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, Subset, ConcatDataset
+
+# Torchvision Imports
+import torchvision.transforms as T
+from torchvision.transforms.functional import to_pil_image, to_tensor, resize
+
+# Other Imports
+from sklearn.model_selection import train_test_split
+from transformers import SwinModel
+
+# Setup Seed for Reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True # Enable cudnn benchmark for speed
+    print(f"✅ GPU Detected: {torch.cuda.get_device_name(0)}")
+else:
+    print("❌ GPU NOT Detected. Please enable 'Accelerator: GPU' in Kaggle Settings.")
+
+print(f"PyTorch version: {torch.__version__}")
+
+--- CANDIDATE CELL 2 ---
+# Block 1.5: High-Quality K-Means Confidence (GPU, sklearn-grade)
+
+import torch
+import torch.nn.functional as F
+
+# -------- KMEANS++ INIT --------
+def _kmeans_pp_init(x, k):
+    n = x.size(0)
+    centers = torch.empty((k, x.size(1)), device=x.device)
+
+    idx = torch.randint(0, n, (1,), device=x.device)
+    centers[0] = x[idx]
+
+    for i in range(1, k):
+        dist = torch.cdist(x, centers[:i]).min(dim=1).values
+        probs = dist / dist.sum()
+        idx = torch.multinomial(probs, 1)
+        centers[i] = x[idx]
+
+    return centers
+
+
+# -------- HIGH QUALITY KMEANS --------
+def _torch_kmeans_hq(x, k=9, iters=50, n_init=5):
+    best_labels = None
+    best_inertia = None
+
+    for _ in range(n_init):
+        centers = _kmeans_pp_init(x, k)
+
+        for _ in range(iters):
+            dist = torch.cdist(x, centers)
+            labels = dist.argmin(dim=1)
+
+            new_centers = []
+            for i in range(k):
+                m = labels == i
+                if m.any():
+                    new_centers.append(x[m].mean(dim=0))
+                else:
+                    new_centers.append(centers[i])
+            centers = torch.stack(new_centers)
+
+        inertia = torch.sum((x - centers[labels]) ** 2)
+
+        if best_inertia is None or inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels.clone()
+
+    return best_labels
+
+
+def calculate_kmeans_confidence(image_tensor, mask_tensor, filename=None, cache=None, k=9, top_n=4):
+
+    if image_tensor.dim() == 4: image_tensor = image_tensor[0]
+    if mask_tensor.dim() == 4: mask_tensor = mask_tensor[0]
+    if mask_tensor.dim() == 3: mask_tensor = mask_tensor[0]
+
+    device = image_tensor.device
+    labels = None
+
+    # -------- CACHE --------
+    if cache is not None and filename is not None and filename in cache:
+        labels = cache[filename]
+        if not torch.is_tensor(labels):
+            labels = torch.from_numpy(labels)
+        labels = labels.to(device)
+        h, w = labels.shape
+
+    # -------- KMEANS --------
+    if labels is None:
+        mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3,1,1)
+        std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3,1,1)
+
+        img = (image_tensor * std + mean).clamp(0,1)
+        img = img.permute(1,2,0)
+        h, w = img.shape[:2]
+
+        pixels = img.reshape(-1, 3)
+
+        try:
+            lbl = _torch_kmeans_hq(pixels, k=k, iters=50, n_init=5)
+            labels = lbl.view(h, w)
+            if cache is not None and filename is not None:
+                cache[filename] = labels.detach()
+        except:
+            return 0.5
+
+    # -------- CONFIDENCE --------
+    mask = (mask_tensor > 0.5).to(device)
+
+    if mask.shape != labels.shape:
+        mask = F.interpolate(
+            mask.unsqueeze(0).unsqueeze(0).float(),
+            size=labels.shape,
+            mode="nearest"
+        )[0,0].bool()
+
+    masked = labels[mask]
+    if masked.numel() == 0:
+        return 0.5
+
+    counts = torch.bincount(masked)
+    freqs = counts.float() / counts.sum()
+    return freqs.sort(descending=True).values[:top_n].sum().item()
+
+
+def apply_confidence_weighting(outputs, images, filenames=None, cache=None, k=9, top_n=4):
+    weighted = outputs.clone()
+    probs = torch.sigmoid(outputs)
+
+    for b in range(outputs.size(0)):
+        conf = calculate_kmeans_confidence(
+            images[b], probs[b],
+            filename=filenames[b] if filenames is not None else None,
+            cache=cache, k=k, top_n=top_n
+        )
+        weighted[b] = outputs[b] * conf
+
+    return weighted
+
+
+print("🔥 High-quality GPU K-Means loaded (k-means++, multi-init)")
+
+
+--- CANDIDATE CELL 3 ---
+# Block 2: PolypMix Augmentation Module (Self-contained)
+
+class SimplePolypMixAugmentor:
+    """
+    Mask-based PolypMix augmentation.
+    
+    Uses ground truth masks to compute mixing weights. The key idea is to
+    mix two images by sampling MORE on polyp-like pixels and LESS on
+    background-like pixels.
+    """
+    
+    def __init__(self, threshold=0.7):
+        self.threshold = threshold
+        
+    def mix_pair(self, image0, mask0, image1, mask1):
+        """
+        Mix two image-mask pairs using polyp-aware weighting.
+        """
+        # Ensure masks have channel dimension
+        if mask0.dim() == 2:
+            mask0 = mask0.unsqueeze(0)
+        if mask1.dim() == 2:
+            mask1 = mask1.unsqueeze(0)
+        
+        # Normalize masks to [0, 1]
+        mask0 = mask0.float()
+        mask1 = mask1.float()
+        if mask0.max() > 1:
+            mask0 = mask0 / 255.0
+        if mask1.max() > 1:
+            mask1 = mask1 / 255.0
+        
+        # Compute mix factor: sample more on polyp-like pixels
+        eps = 1e-7
+        mix_factor = torch.div(mask1, mask0 + mask1 + eps)
+        
+        # Mix images
+        mixed_image = torch.add(
+            torch.mul(image0, 1.0 - mix_factor),
+            torch.mul(image1, mix_factor),
+        )
+        
+        # Mix masks
+        mixed_mask = torch.add(
+            torch.mul(mask0, 1.0 - mix_factor),
+            torch.mul(mask1, mix_factor),
+        )
+        
+        # Create pseudo-label with threshold filtering
+        domain_mask0 = torch.mul(mask0 > mask1, mask0 > self.threshold)
+        domain_mask1 = torch.mul(mask1 > mask0, mask1 > self.threshold)
+        
+        pseudo_mask = torch.add(
+            torch.mul(mask0, domain_mask0.float()) + torch.mul(mask1, domain_mask1.float()),
+            torch.mul(mixed_mask, torch.logical_not(torch.logical_or(domain_mask0, domain_mask1)).float()),
+        )
+        
+        return mixed_image, pseudo_mask
+    
+    def __call__(self, image0, mask0, image1, mask1):
+        return self.mix_pair(image0, mask0, image1, mask1)
+
+
+class PolypMixDataset(Dataset):
+    """
+    Dataset that returns both original and PolypMix augmented samples.
+    """
+    
+    def __init__(self, base_dataset, augment_ratio=1.0, threshold=0.7):
+        self.base_dataset = base_dataset
+        self.augment_ratio = augment_ratio
+        self.threshold = threshold
+        
+        self.base_len = len(base_dataset)
+        self.augment_len = int(self.base_len * augment_ratio)
+        
+        self.augmentor = SimplePolypMixAugmentor(threshold=threshold)
+        self._generate_pairs()
+        
+    def _generate_pairs(self):
+        """Generate random pairs for augmentation."""
+        self.pairs = []
+        indices = list(range(self.base_len))
+        for _ in range(self.augment_len):
+            idx0, idx1 = random.sample(indices, 2)
+            self.pairs.append((idx0, idx1))
+            
+    def __len__(self):
+        return self.base_len + self.augment_len
+    
+    def __getitem__(self, index):
+        if index < self.base_len:
+            # Return original sample
+            image, mask, filename = self.base_dataset[index]
+            return image, mask, filename
+        else:
+            # Return augmented sample
+            aug_index = index - self.base_len
+            idx0, idx1 = self.pairs[aug_index]
+            
+            image0, mask0, fn0 = self.base_dataset[idx0]
+            image1, mask1, fn1 = self.base_dataset[idx1]
+            
+            mixed_image, mixed_mask = self.augmentor(image0, mask0, image1, mask1)
+            
+            return mixed_image, mixed_mask, f'aug_{idx0}_{idx1}'
+    
+    def reshuffle_pairs(self):
+        """Reshuffle augmentation pairs (call at start of each epoch)."""
+        self._generate_pairs()
+
+
+print("PolypMix augmentation module loaded successfully!")
+
+--- CANDIDATE CELL 4 ---
+# Block 3: Load Dataset (Kaggle)
+
+# For Kaggle - use the input data path
+# Update this path to match your Kaggle dataset location
+DATA_ROOT = "/kaggle/input/dataset1/CVC-ClinicDB-612"  # Kaggle path
+# DATA_ROOT = "/content/CVC-ClinicDB-612"  # Colab path
+
+# Check if running in Kaggle or Colab
+if os.path.exists("/kaggle/input"):
+    print("Running in Kaggle environment")
+    OUTPUT_DIR = "/kaggle/working"
+elif os.path.exists("/content"):
+    print("Running in Colab environment")
+    OUTPUT_DIR = "/content/output"
+    DATA_ROOT = "/content/CVC-ClinicDB-612"
+else:
+    print("Running locally")
+    OUTPUT_DIR = "./output"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+IMAGE_DIR = os.path.join(DATA_ROOT, "images")
+MASK_DIR = os.path.join(DATA_ROOT, "Ground Truth")
+
+print(f"Data root: {DATA_ROOT}")
+print(f"Output directory: {OUTPUT_DIR}")
+
+--- CANDIDATE CELL 5 ---
+# Block 4: Configuration
+
+# Training parameters
+TRAINING_SIZE = 490           # Options: 25, 50, 75, 100 for SSL
+NUM_EPOCHS = 50              # Max epochs (may stop early)
+BATCH_SIZE = 8
+LEARNING_RATE = 1e-4
+IMAGE_SIZE = 224
+
+# PolypMix parameters
+USE_POLYPMIX = True          # Enable PolypMix augmentation
+POLYPMIX_RATIO = 2.0         # Augmentation ratio (1.0 = double dataset)
+POLYPMIX_THRESHOLD = 0.7     # Confidence threshold for mixing
+
+# Early stopping parameters
+EARLY_STOPPING_PATIENCE = 10  # Stop if no improvement for N epochs
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+print(f"--- Experiment Configuration ---")
+print(f"Training Size: {TRAINING_SIZE}")
+print(f"Max Epochs: {NUM_EPOCHS}")
+print(f"Batch Size: {BATCH_SIZE}")
+print(f"Device: {DEVICE}")
+print(f"Early Stopping Patience: {EARLY_STOPPING_PATIENCE}")
+print(f"Model Selection Metric: Dice Score")
+print(f"PolypMix Enabled: {USE_POLYPMIX}")
+if USE_POLYPMIX:
+    print(f"  - Augmentation Ratio: {POLYPMIX_RATIO}")
+    print(f"  - Threshold: {POLYPMIX_THRESHOLD}")
+print("-" * 35)
+
+--- CANDIDATE CELL 6 ---
+# Block 5: Model Architecture (Swin-UNet)
+
+class SwinUNet(nn.Module):
+    def __init__(self, num_classes=1):
+        super(SwinUNet, self).__init__()
+        # Encoder: Pre-trained Swin Transformer
+        self.swin = SwinModel.from_pretrained(
+            "microsoft/swin-base-patch4-window7-224",
+            output_hidden_states=True,
+        )
+
+        # Freeze some early layers
+        for name, param in self.swin.named_parameters():
+            if "layers.0" in name or "layers.1" in name or "embed" in name:
+                 param.requires_grad = False
+
+        # Decoder
+        self.decoder4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.conv4 = nn.Sequential(nn.Conv2d(1024, 512, 3, padding=1), nn.ReLU())
+
+        self.decoder3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.conv3 = nn.Sequential(nn.Conv2d(512, 256, 3, padding=1), nn.ReLU())
+
+        self.decoder2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.conv2 = nn.Sequential(nn.Conv2d(256, 128, 3, padding=1), nn.ReLU())
+
+        self.final_upsample = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, num_classes, kernel_size=1)
+        )
+
+    def forward(self, x):
+        hidden_states = self.swin(x).hidden_states
+
+        # Reshape hidden states
+        B, L1, C1 = hidden_states[0].shape
+        H1 = W1 = int(L1**0.5)
+        s1 = hidden_states[0].reshape(B, H1, W1, C1).permute(0, 3, 1, 2)
+
+        B, L2, C2 = hidden_states[1].shape
+        H2 = W2 = int(L2**0.5)
+        s2 = hidden_states[1].reshape(B, H2, W2, C2).permute(0, 3, 1, 2)
+
+        B, L3, C3 = hidden_states[2].shape
+        H3 = W3 = int(L3**0.5)
+        s3 = hidden_states[2].reshape(B, H3, W3, C3).permute(0, 3, 1, 2)
+
+        B, L4, C4 = hidden_states[3].shape
+        H4 = W4 = int(L4**0.5)
+        s4 = hidden_states[3].reshape(B, H4, W4, C4).permute(0, 3, 1, 2)
+
+        # Decoder with skip connections
+        d4 = self.decoder4(s4)
+        d4 = torch.cat([d4, s3], dim=1)
+        d4 = self.conv4(d4)
+
+        d3 = self.decoder3(d4)
+        d3 = torch.cat([d3, s2], dim=1)
+        d3 = self.conv3(d3)
+
+        d2 = self.decoder2(d3)
+        d2 = torch.cat([d2, s1], dim=1)
+        d2 = self.conv2(d2)
+
+        out = self.final_upsample(d2)
+        out = self.final_conv(out)
+
+        return out
+
+print("SwinUNet model defined.")
+
+--- CANDIDATE CELL 7 ---
+# Block 6: Loss Functions and Metrics
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = torch.sigmoid(logits)
+        probs_flat = probs.view(-1)
+        targets_flat = targets.view(-1)
+        intersection = (probs_flat * targets_flat).sum()
+        dice = (2. * intersection + self.smooth) / (probs_flat.sum() + targets_flat.sum() + self.smooth)
+        return 1 - dice
+
+def combined_loss(logits, targets):
+    bce = nn.BCEWithLogitsLoss()
+    dice = DiceLoss()
+    return bce(logits, targets) + dice(logits, targets)
+
+def calculate_metrics(logits, targets, threshold=0.5, epsilon=1e-6):
+    probs = torch.sigmoid(logits)
+    preds = (probs > threshold).float()
+    preds_flat = preds.view(-1)
+    targets_flat = targets.view(-1)
+    intersection = (preds_flat * targets_flat).sum()
+    dice_score = (2. * intersection) / (preds_flat.sum() + targets_flat.sum() + epsilon)
+    union = preds_flat.sum() + targets_flat.sum() - intersection
+    iou_score = intersection / (union + epsilon)
+    return iou_score.item(), dice_score.item()
+
+print("Loss functions and metrics defined.")
+
+--- CANDIDATE CELL 8 ---
+# Block 7: Dataset Class
+
+class PolypDataset(Dataset):
+    def __init__(self, image_filenames, image_dir, mask_dir):
+        self.image_filenames = image_filenames
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+
+        self.image_transform = T.Compose([
+            T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        self.mask_transform = T.Compose([
+            T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            T.ToTensor(),
+        ])
+
+    def __len__(self):
+        return len(self.image_filenames)
+
+    def __getitem__(self, idx):
+        filename = self.image_filenames[idx]
+        img_path = os.path.join(self.image_dir, filename)
+        mask_path = os.path.join(self.mask_dir, filename)
+        
+        image = PIL.Image.open(img_path).convert("RGB")
+        mask = PIL.Image.open(mask_path).convert("L")
+
+        image = self.image_transform(image)
+        mask = self.mask_transform(mask)
+        mask = (mask > 0.5).float()
+
+        return image, mask, filename
+
+print("Dataset class defined.")
+
+--- CANDIDATE CELL 9 ---
+# Block 8: Data Loading with PolypMix
+
+# Get all filenames
+all_filenames = sorted(os.listdir(IMAGE_DIR))
+print(f"Total images found: {len(all_filenames)}")
+
+# Split into train and validation
+train_pool_files, val_pool_files = train_test_split(
+    all_filenames,
+    test_size=0.15,
+    random_state=SEED
+)
+
+print(f"Training pool: {len(train_pool_files)} images")
+print(f"Validation pool: {len(val_pool_files)} images")
+
+# Select labeled samples for training
+labeled_pool_files = train_pool_files[:TRAINING_SIZE]
+print(f"Using {len(labeled_pool_files)} labeled samples for training")
+
+# Create base dataset
+train_dataset_base = PolypDataset(
+    image_filenames=labeled_pool_files,
+    image_dir=IMAGE_DIR,
+    mask_dir=MASK_DIR
+)
+
+# Apply PolypMix augmentation if enabled
+if USE_POLYPMIX:
+    train_dataset = PolypMixDataset(
+        base_dataset=train_dataset_base,
+        augment_ratio=POLYPMIX_RATIO,
+        threshold=POLYPMIX_THRESHOLD
+    )
+    print(f"\nPolypMix augmentation enabled!")
+    print(f"  Original samples: {len(train_dataset_base)}")
+    print(f"  Augmented samples: {len(train_dataset) - len(train_dataset_base)}")
+    print(f"  Total training samples: {len(train_dataset)}")
+else:
+    train_dataset = train_dataset_base
+    print(f"Training with {len(train_dataset)} samples (no augmentation)")
+
+# Create data loaders
+# Added pin_memory=True for efficient GPU transfer
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    num_workers=2,
+    pin_memory=True if torch.cuda.is_available() else False
+)
+
+val_dataset = PolypDataset(
+    image_filenames=val_pool_files,
+    image_dir=IMAGE_DIR,
+    mask_dir=MASK_DIR
+)
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    num_workers=2,
+    pin_memory=True if torch.cuda.is_available() else False
+)
+
+print(f"\nData loaders created successfully!")
+
+--- CANDIDATE CELL 10 ---
+# Block 8.5: Precompute K-Means Clusters (GPU, HQ)
+# Runs HQ GPU K-Means once per image and caches labels
+
+KMEANS_CACHE = {}
+
+print("Precomputing K-Means clusters for dataset...")
+print("This may take a minute, but will save hours during training.")
+
+datasets_to_process = [train_dataset_base, val_dataset]
+
+for dataset in datasets_to_process:
+    for i in tqdm(range(len(dataset)), desc="Caching K-Means"):
+        image, _, filename = dataset[i]
+
+        try:
+            device = image.device if image.is_cuda else torch.device("cuda")
+
+            # Denormalize (same as everywhere else)
+            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3,1,1)
+            std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3,1,1)
+
+            img = (image.to(device) * std + mean).clamp(0,1)
+            img = img.permute(1,2,0)          # HWC
+            h, w = img.shape[:2]
+
+            pixels = img.reshape(-1, 3)
+
+            # HQ GPU K-Means (same as Block 1.5 / 8)
+            labels = _torch_kmeans_hq(
+                pixels,
+                k=9,
+                iters=50,
+                n_init=5
+            )
+
+            labels = labels.view(h, w).cpu()   # store CPU tensor (safe, small)
+
+            KMEANS_CACHE[filename] = labels
+
+        except Exception as e:
+            print(f"Failed to cache {filename}: {e}")
+
+print(f"Successfully cached clusters for {len(KMEANS_CACHE)} images.")
+
+
+--- CANDIDATE CELL 11 ---
+# Block 8.6: Epoch Visualization Function
+# Original | Prediction | GT | High-Quality K-Means Colorized
+# Saves to output_dir AND shows via plt
+
+import torch
+import numpy as np
+import cv2
+import random
+import os
+import matplotlib.pyplot as plt
+
+
+# -------- KMEANS++ INIT --------
+def _kmeans_pp_init(x, k):
+    n = x.size(0)
+    centers = torch.empty((k, x.size(1)), device=x.device)
+
+    idx = torch.randint(0, n, (1,), device=x.device)
+    centers[0] = x[idx]
+
+    for i in range(1, k):
+        dist = torch.cdist(x, centers[:i]).min(dim=1).values
+        probs = dist / dist.sum()
+        idx = torch.multinomial(probs, 1)
+        centers[i] = x[idx]
+
+    return centers
+
+
+# -------- HIGH-QUALITY KMEANS --------
+def _torch_kmeans_hq(x, k=9, iters=50, n_init=5):
+    best_labels = None
+    best_inertia = None
+
+    for _ in range(n_init):
+        centers = _kmeans_pp_init(x, k)
+
+        for _ in range(iters):
+            dist = torch.cdist(x, centers)
+            labels = dist.argmin(dim=1)
+
+            new_centers = []
+            for i in range(k):
+                m = labels == i
+                if m.any():
+                    new_centers.append(x[m].mean(dim=0))
+                else:
+                    new_centers.append(centers[i])
+            centers = torch.stack(new_centers)
+
+        inertia = torch.sum((x - centers[labels]) ** 2)
+        if best_inertia is None or inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels.clone()
+
+    return best_labels
+
+
+# -------- COLORIZED IMAGE --------
+def create_kmeans_colorized(img_np, k=9):
+    h, w = img_np.shape[:2]
+
+    pixels = torch.from_numpy(img_np.reshape(-1, 3)).float().cuda() / 255.0
+
+    try:
+        labels = _torch_kmeans_hq(pixels, k=k)
+        labels = labels.view(h, w).cpu().numpy()
+
+        colors = []
+        for i in range(k):
+            hue = int(180 * i / k)
+            hsv = np.uint8([[[hue, 255, 255]]])
+            rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0][0]
+            colors.append(rgb)
+
+        colored = np.zeros((h, w, 3), dtype=np.uint8)
+        for i in range(k):
+            colored[labels == i] = colors[i]
+
+        return colored
+    except:
+        return img_np
+
+
+# -------- VISUALIZATION --------
+def visualize_epoch_progress(model, val_dataset, epoch, device, output_dir, k=9):
+
+    import os
+    import random
+    import numpy as np
+    import torch
+    import matplotlib.pyplot as plt
+
+    os.makedirs(output_dir, exist_ok=True)
+    model.eval()
+
+    # -------- sample --------
+    idx = random.randint(0, len(val_dataset) - 1)
+    image, mask, filename = val_dataset[idx]
+    image_batch = image.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        output = model(image_batch)
+        pred = (torch.sigmoid(output) > 0.5).float()
+
+    # -------- denorm --------
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+    std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+
+    img_denorm = (image.cpu() * std) + mean
+    img_np = np.clip(img_denorm.permute(1,2,0).numpy(), 0, 1)
+    img_uint8 = (img_np * 255).astype(np.uint8)
+
+    gt_mask = mask.cpu().squeeze().numpy()
+    pr_mask = pred[0].cpu().squeeze().numpy()
+
+    # -------- KMEANS --------
+    kmeans_colored = create_kmeans_colorized(img_uint8, k=k)
+
+    # 5️⃣ reconstructed image (cluster colors instead of HSV colors)
+    pixels = torch.from_numpy(img_uint8.reshape(-1,3)).float().cuda() / 255.0
+    labels = _torch_kmeans_hq(pixels, k=k).view(img_uint8.shape[:2]).cpu().numpy()
+
+    recon = np.zeros_like(img_uint8)
+    for i in range(k):
+        recon[labels == i] = img_uint8[labels == i].mean(axis=0)
+
+    # 6️⃣ predicted mask applied
+    pred_masked = np.zeros_like(kmeans_colored)
+    pred_masked[pr_mask > 0.5] = kmeans_colored[pr_mask > 0.5]
+
+    # 7️⃣ ground-truth mask applied
+    gt_masked = np.zeros_like(kmeans_colored)
+    gt_masked[gt_mask > 0.5] = kmeans_colored[gt_mask > 0.5]
+
+    # -------- PLOT --------
+    fig, ax = plt.subplots(1, 7, figsize=(28, 4))
+
+    ax[0].imshow(img_np)
+    ax[0].set_title("Original")
+    ax[0].axis("off")
+
+    ax[1].imshow(pr_mask, cmap="gray")
+    ax[1].set_title("Prediction")
+    ax[1].axis("off")
+
+    ax[2].imshow(gt_mask, cmap="gray")
+    ax[2].set_title("Ground Truth")
+    ax[2].axis("off")
+
+    ax[3].imshow(kmeans_colored)
+    ax[3].set_title("K-Means (Color IDs)")
+    ax[3].axis("off")
+
+    ax[4].imshow(recon)
+    ax[4].set_title("K-Means Reconstructed Image")
+    ax[4].axis("off")
+
+    ax[5].imshow(pred_masked)
+    ax[5].set_title("K-Means × Prediction Mask")
+    ax[5].axis("off")
+
+    ax[6].imshow(gt_masked)
+    ax[6].set_title("K-Means × GT Mask")
+    ax[6].axis("off")
+
+    plt.suptitle(f"Epoch {epoch} – Deep K-Means Analysis", fontweight="bold")
+    plt.tight_layout()
+
+    save_path = os.path.join(output_dir, f"epoch_{epoch:03d}_analysis.png")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+    print(f"📊 Epoch {epoch} analysis saved → {save_path}")
+
+
+
+
+
+--- CANDIDATE CELL 12 ---
+# Block 9: Visualize PolypMix Augmentation
+
+if USE_POLYPMIX:
+    print("Visualizing PolypMix augmentation samples...")
+    
+    # Get a batch
+    images, masks, filenames = next(iter(train_loader))
+    
+    # Show first 3 samples
+    fig, axes = plt.subplots(3, 2, figsize=(10, 12))
+    
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    
+    for i in range(min(3, len(images))):
+        # De-normalize image
+        img = (images[i].cpu() * std) + mean
+        img = img.permute(1, 2, 0).numpy()
+        img = np.clip(img, 0, 1)
+        
+        mask = masks[i].cpu().squeeze().numpy()
+        
+        axes[i, 0].imshow(img)
+        axes[i, 0].set_title(f"Image: {filenames[i][:20]}...")
+        axes[i, 0].axis('off')
+        
+        axes[i, 1].imshow(mask, cmap='gray')
+        axes[i, 1].set_title("Mask")
+        axes[i, 1].axis('off')
+    
+    plt.suptitle("PolypMix Training Samples", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "polypmix_samples.png"))
+    plt.show()
+    print(f"Saved to {os.path.join(OUTPUT_DIR, 'polypmix_samples.png')}")
+
+--- CANDIDATE CELL 13 ---
+# Block 10: Initialize Model and Optimizer
+
+model = SwinUNet(num_classes=1).to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+criterion = combined_loss
+
+# Count parameters
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+print(f"Model initialized on {DEVICE}")
+print(f"Total parameters: {total_params:,}")
+print(f"Trainable parameters: {trainable_params:,}")
+
+--- CANDIDATE CELL 14 ---
+# Block 11: Training and Validation Functions (Updated for Caching)
+
+def train_epoch(model, loader, optimizer, criterion, device, cache=None):
+    model.train()
+    total_loss = 0
+    total_iou = 0
+    total_dice = 0
+    
+    # Updated: Now unpacking 'filenames' (the 3rd item)
+    for images, masks, filenames in tqdm(loader, desc="Training"):
+        images = images.to(device)
+        masks = masks.to(device)
+        
+        optimizer.zero_grad()
+        outputs = model(images)
+        
+        # Pass filenames and cache here
+        outputs = apply_confidence_weighting(
+            outputs, 
+            images, 
+            filenames=filenames, 
+            cache=cache, 
+            k=9, 
+            top_n=4
+        )
+        
+        loss = criterion(outputs, masks)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        iou, dice = calculate_metrics(outputs, masks)
+        total_iou += iou
+        total_dice += dice
+    
+    n = len(loader)
+    return total_loss / n, total_iou / n, total_dice / n
+
+def validate(model, loader, criterion, device, cache=None):
+    model.eval()
+    total_loss = 0
+    total_iou = 0
+    total_dice = 0
+    
+    with torch.no_grad():
+        # Updated: Now unpacking 'filenames'
+        for images, masks, filenames in tqdm(loader, desc="Validation"):
+            images = images.to(device)
+            masks = masks.to(device)
+            
+            outputs = model(images)
+            
+            # Pass filenames and cache here
+            outputs = apply_confidence_weighting(
+                outputs, 
+                images, 
+                filenames=filenames, 
+                cache=cache, 
+                k=9, 
+                top_n=4
+            )
+            
+            loss = criterion(outputs, masks)
+            
+            total_loss += loss.item()
+            iou, dice = calculate_metrics(outputs, masks)
+            total_iou += iou
+            total_dice += dice
+    
+    n = len(loader)
+    return total_loss / n, total_iou / n, total_dice / n
+
+print("Training and validation functions defined (Cache enabled).")
+
+--- CANDIDATE CELL 15 ---
+##### Block 12: Training Loop with Early Stopping (based on Dice Score)
+
+print("="*60)
+print(f"Starting Training with PolypMix Augmentation")
+print(f"Training samples: {len(train_dataset)}")
+print(f"Validation samples: {len(val_dataset)}")
+print(f"Model selection based on: Dice Score")
+print(f"Early stopping patience: {EARLY_STOPPING_PATIENCE} epochs")
+print("="*60)
+
+train_losses = []
+val_losses = []
+train_dices = []
+val_dices = []
+train_ious = []
+val_ious = []
+
+# -------- LOG FILE SETUP (ADDED) --------
+log_path = os.path.join(OUTPUT_DIR, "training_log.txt")
+log_file = open(log_path, "w")
+log_file.write("epoch,train_loss,train_dice,train_iou,val_loss,val_dice,val_iou\n")
+log_file.flush()
+# ---------------------------------------
+
+# Best model tracking (based on Dice score)
+best_dice = 0.0
+best_epoch = 0
+epochs_without_improvement = 0
+
+for epoch in range(NUM_EPOCHS):
+    print(f"\nEpoch {epoch+1}/{NUM_EPOCHS}")
+    print("-" * 40)
+    
+    # Reshuffle augmentation pairs at start of each epoch
+    if USE_POLYPMIX and hasattr(train_dataset, 'reshuffle_pairs'):
+        train_dataset.reshuffle_pairs()
+    
+    # Training
+    train_loss, train_iou, train_dice = train_epoch(
+        model, train_loader, optimizer, criterion, DEVICE, cache=KMEANS_CACHE
+    )
+    
+    # Validation
+    val_loss, val_iou, val_dice = validate(
+        model, val_loader, criterion, DEVICE, cache=KMEANS_CACHE
+    )
+    
+    visualize_epoch_progress(
+        model,
+        val_dataset,
+        epoch,
+        DEVICE,
+        OUTPUT_DIR,
+        k=9
+    )
+
+    # Store metrics
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    train_dices.append(train_dice)
+    val_dices.append(val_dice)
+    train_ious.append(train_iou)
+    val_ious.append(val_iou)
+    
+    # Print results
+    print(f"Train Loss: {train_loss:.4f} | Train Dice: {train_dice:.4f} | Train IoU: {train_iou:.4f}")
+    print(f"Val Loss: {val_loss:.4f} | Val Dice: {val_dice:.4f} | Val IoU: {val_iou:.4f}")
+
+    # -------- LOG PER EPOCH (ADDED) --------
+    log_file.write(
+        f"{epoch+1},"
+        f"{train_loss:.6f},{train_dice:.6f},{train_iou:.6f},"
+        f"{val_loss:.6f},{val_dice:.6f},{val_iou:.6f}\n"
+    )
+    log_file.flush()
+    # --------------------------------------
+    
+    # Save best model based on Dice score
+    if val_dice > best_dice:
+        best_dice = val_dice
+        best_epoch = epoch + 1
+        epochs_without_improvement = 0
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_dice': best_dice,
+            'best_iou': val_iou,
+        }, os.path.join(OUTPUT_DIR, 'best_model.pth'))
+        print(f"  -> New best model saved! (Dice: {best_dice:.4f})")
+    else:
+        epochs_without_improvement += 1
+        print(f"  No improvement for {epochs_without_improvement} epoch(s)")
+    
+    # Early stopping check
+    if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+        print(f"\n[!] Early stopping triggered! No improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+        break
+
+# -------- CLOSE LOG FILE (ADDED) --------
+log_file.close()
+print(f"📄 Training log saved to: {log_path}")
+# --------------------------------------
+
+print("\n" + "="*60)
+print(f"Training Complete!")
+print(f"Best Validation Dice: {best_dice:.4f} (Epoch {best_epoch})")
+print(f"Total epochs trained: {epoch + 1}")
+print("="*60)
+
+
+--- CANDIDATE CELL 16 ---
+# Block 13: Plot Training Results
+
+# Use actual number of epochs trained (may be less due to early stopping)
+actual_epochs = len(train_losses)
+epochs = range(1, actual_epochs + 1)
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+# Loss plot
+axes[0].plot(epochs, train_losses, 'b-o', label='Train Loss')
+axes[0].plot(epochs, val_losses, 'r-o', label='Val Loss')
+axes[0].set_xlabel('Epoch')
+axes[0].set_ylabel('Loss')
+axes[0].set_title('Training vs Validation Loss')
+axes[0].legend()
+axes[0].grid(True)
+
+# Dice plot
+axes[1].plot(epochs, train_dices, 'b-o', label='Train Dice')
+axes[1].plot(epochs, val_dices, 'r-o', label='Val Dice')
+axes[1].axhline(y=best_dice, color='g', linestyle='--', label=f'Best: {best_dice:.4f}')
+axes[1].set_xlabel('Epoch')
+axes[1].set_ylabel('Dice Score')
+axes[1].set_title('Training vs Validation Dice')
+axes[1].legend()
+axes[1].grid(True)
+
+# IoU plot
+axes[2].plot(epochs, train_ious, 'b-o', label='Train IoU')
+axes[2].plot(epochs, val_ious, 'r-o', label='Val IoU')
+axes[2].set_xlabel('Epoch')
+axes[2].set_ylabel('IoU')
+axes[2].set_title('Training vs Validation IoU')
+axes[2].legend()
+axes[2].grid(True)
+
+plt.suptitle(f'PolypMix Training Results (Best Dice: {best_dice:.4f} at Epoch {best_epoch})', fontsize=14)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, 'training_results.png'), dpi=150)
+plt.show()
+
+print(f"Results saved to {OUTPUT_DIR}")
+
+--- CANDIDATE CELL 17 ---
+# Block 14: Sample Predictions
+
+# Load best model
+checkpoint = torch.load(os.path.join(OUTPUT_DIR, 'best_model.pth'))
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+print(f"Loaded best model from Epoch {checkpoint['epoch']+1}")
+print(f"Best Dice: {checkpoint['best_dice']:.4f}")
+
+# Get validation samples
+images, masks, filenames = next(iter(val_loader))
+images = images.to(DEVICE)
+
+with torch.no_grad():
+    outputs = model(images)
+    preds = (torch.sigmoid(outputs) > 0.5).float()
+
+# Visualize
+mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+fig, axes = plt.subplots(3, 3, figsize=(12, 12))
+
+for i in range(min(3, len(images))):
+    # De-normalize image
+    img = (images[i].cpu() * std) + mean
+    img = img.permute(1, 2, 0).numpy()
+    img = np.clip(img, 0, 1)
+    
+    gt_mask = masks[i].cpu().squeeze().numpy()
+    pred_mask = preds[i].cpu().squeeze().numpy()
+    
+    axes[i, 0].imshow(img)
+    axes[i, 0].set_title("Image")
+    axes[i, 0].axis('off')
+    
+    axes[i, 1].imshow(gt_mask, cmap='gray')
+    axes[i, 1].set_title("Ground Truth")
+    axes[i, 1].axis('off')
+    
+    axes[i, 2].imshow(pred_mask, cmap='gray')
+    axes[i, 2].set_title("Prediction")
+    axes[i, 2].axis('off')
+
+plt.suptitle('Sample Predictions', fontsize=14)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, 'sample_predictions.png'), dpi=150)
+plt.show()
+
+print("Sample predictions saved!")
+
+--- CANDIDATE CELL 18 ---
+
+
+--- CANDIDATE CELL 19 ---
+
+
+--- CANDIDATE CELL 20 ---
+
+
