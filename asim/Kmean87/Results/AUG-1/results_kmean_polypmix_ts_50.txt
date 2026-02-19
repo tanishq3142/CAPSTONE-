@@ -1,0 +1,48 @@
+PolypMix + K-Means Experiment Results
+========================================
+Batch Size: 8
+PolypMix Ratio: 1.0
+Threshold: 0.7
+Training Size: 50
+Learning Rate: 0.0001
+Image Size: 224
+Early Stopping Patience: 10
+========================================
+
+Epoch 1: Train Loss=1.2310, Train Dice=0.0000, Train IoU=0.0000 | Val Loss=0.8956, Val Dice=0.0207, Val IoU=0.0114
+Epoch 2: Train Loss=0.7007, Train Dice=0.5242, Train IoU=0.4026 | Val Loss=0.5698, Val Dice=0.7176, Val IoU=0.5624
+Epoch 3: Train Loss=0.3855, Train Dice=0.8306, Train IoU=0.7144 | Val Loss=0.3804, Val Dice=0.7769, Val IoU=0.6392
+Epoch 4: Train Loss=0.2511, Train Dice=0.8679, Train IoU=0.7694 | Val Loss=0.3217, Val Dice=0.7987, Val IoU=0.6711
+Epoch 5: Train Loss=0.1901, Train Dice=0.8969, Train IoU=0.8135 | Val Loss=0.3104, Val Dice=0.8212, Val IoU=0.6983
+Epoch 6: Train Loss=0.1624, Train Dice=0.9132, Train IoU=0.8406 | Val Loss=0.2694, Val Dice=0.8457, Val IoU=0.7355
+Epoch 7: Train Loss=0.1287, Train Dice=0.9321, Train IoU=0.8729 | Val Loss=0.2632, Val Dice=0.8458, Val IoU=0.7354
+Epoch 8: Train Loss=0.1195, Train Dice=0.9332, Train IoU=0.8753 | Val Loss=0.2732, Val Dice=0.8493, Val IoU=0.7408
+Epoch 9: Train Loss=0.1044, Train Dice=0.9453, Train IoU=0.8964 | Val Loss=0.2719, Val Dice=0.8499, Val IoU=0.7421
+Epoch 10: Train Loss=0.1006, Train Dice=0.9460, Train IoU=0.8978 | Val Loss=0.2778, Val Dice=0.8496, Val IoU=0.7417
+Epoch 11: Train Loss=0.0998, Train Dice=0.9462, Train IoU=0.8980 | Val Loss=0.2690, Val Dice=0.8499, Val IoU=0.7409
+Epoch 12: Train Loss=0.0894, Train Dice=0.9530, Train IoU=0.9104 | Val Loss=0.2522, Val Dice=0.8671, Val IoU=0.7684
+Epoch 13: Train Loss=0.0811, Train Dice=0.9554, Train IoU=0.9149 | Val Loss=0.2790, Val Dice=0.8538, Val IoU=0.7485
+Epoch 14: Train Loss=0.0716, Train Dice=0.9607, Train IoU=0.9244 | Val Loss=0.2761, Val Dice=0.8557, Val IoU=0.7505
+Epoch 15: Train Loss=0.0642, Train Dice=0.9658, Train IoU=0.9340 | Val Loss=0.2914, Val Dice=0.8571, Val IoU=0.7535
+Epoch 16: Train Loss=0.0646, Train Dice=0.9664, Train IoU=0.9350 | Val Loss=0.2655, Val Dice=0.8666, Val IoU=0.7678
+Epoch 17: Train Loss=0.0625, Train Dice=0.9665, Train IoU=0.9354 | Val Loss=0.2785, Val Dice=0.8643, Val IoU=0.7646
+Epoch 18: Train Loss=0.0595, Train Dice=0.9670, Train IoU=0.9363 | Val Loss=0.2699, Val Dice=0.8696, Val IoU=0.7724
+Epoch 19: Train Loss=0.0567, Train Dice=0.9702, Train IoU=0.9423 | Val Loss=0.2921, Val Dice=0.8610, Val IoU=0.7596
+Epoch 20: Train Loss=0.0585, Train Dice=0.9667, Train IoU=0.9357 | Val Loss=0.2710, Val Dice=0.8702, Val IoU=0.7729
+Epoch 21: Train Loss=0.0647, Train Dice=0.9648, Train IoU=0.9321 | Val Loss=0.3196, Val Dice=0.8565, Val IoU=0.7530
+Epoch 22: Train Loss=0.0681, Train Dice=0.9633, Train IoU=0.9296 | Val Loss=0.3623, Val Dice=0.8219, Val IoU=0.6989
+Epoch 23: Train Loss=0.0527, Train Dice=0.9700, Train IoU=0.9419 | Val Loss=0.3014, Val Dice=0.8566, Val IoU=0.7521
+Epoch 24: Train Loss=0.0497, Train Dice=0.9718, Train IoU=0.9452 | Val Loss=0.2820, Val Dice=0.8677, Val IoU=0.7700
+Epoch 25: Train Loss=0.0426, Train Dice=0.9774, Train IoU=0.9559 | Val Loss=0.2970, Val Dice=0.8655, Val IoU=0.7671
+Epoch 26: Train Loss=0.0398, Train Dice=0.9792, Train IoU=0.9592 | Val Loss=0.2959, Val Dice=0.8637, Val IoU=0.7642
+Epoch 27: Train Loss=0.0413, Train Dice=0.9779, Train IoU=0.9568 | Val Loss=0.3523, Val Dice=0.8472, Val IoU=0.7374
+Epoch 28: Train Loss=0.0383, Train Dice=0.9793, Train IoU=0.9595 | Val Loss=0.3270, Val Dice=0.8572, Val IoU=0.7533
+Epoch 29: Train Loss=0.0375, Train Dice=0.9806, Train IoU=0.9620 | Val Loss=0.3364, Val Dice=0.8583, Val IoU=0.7551
+Epoch 30: Train Loss=0.0375, Train Dice=0.9797, Train IoU=0.9602 | Val Loss=0.3283, Val Dice=0.8568, Val IoU=0.7528
+
+========================================
+FINAL BEST RESULT
+Best Validation Dice: 0.8702
+Best Epoch: 20
+Total Epochs Trained: 30
+
